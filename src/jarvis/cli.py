@@ -8,6 +8,8 @@ from collections.abc import Sequence
 from contextlib import ExitStack
 
 from jarvis import __version__
+from jarvis.audio.cli import add_audio_commands, run_audio
+from jarvis.audio.errors import AudioCancelled, AudioError
 from jarvis.application import Application, ApplicationError
 from jarvis.config import AppConfig, ConfigurationError
 from jarvis.dispatch import DispatchError
@@ -28,6 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     commands.add_parser("demo", help="execute the built-in hello command")
     commands.add_parser("run", help="run until Ctrl+C or SIGTERM")
+    add_audio_commands(commands)
     return parser
 
 
@@ -60,7 +63,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             signals = (
                 process_scope.enter_context(capture_shutdown_signals())
-                if args.command == "run" else None
+                if args.command in ("run", "audio") else None
             )
             config = AppConfig.from_env()
             configure_logging(config)
@@ -69,6 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     show_status(application)
                 elif args.command == "demo":
                     print(application.dispatch("hello"))
+                elif args.command == "audio":
+                    try:
+                        run_audio(args, signals)
+                    except AudioCancelled as exc:
+                        logging.getLogger(__name__).info("%s", exc)
+                        return 128 + exc.signum
                 else:
                     print(
                         f"{config.app_name} {config.app_version} running. "
@@ -84,7 +93,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except (
             ConfigurationError, ApplicationError, DispatchError,
-            SignalHandlingError, OSError,
+            SignalHandlingError, AudioError, OSError,
         ) as exc:
             print(f"jarvis: {exc}", file=sys.stderr)
             return 1

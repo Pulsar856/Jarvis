@@ -44,7 +44,8 @@ class CliTests(unittest.TestCase):
         result = self.invoke()
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn(f"Jarvis {__version__}", result.stdout)
-        self.assertIn("{status,demo,run}", result.stdout)
+        for command in ("status", "demo", "run", "audio"):
+            self.assertIn(command, result.stdout)
 
     def test_version_matches_package(self) -> None:
         result = self.invoke("--version")

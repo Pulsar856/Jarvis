@@ -2,11 +2,17 @@
 
 ## Deployment status and approval boundary
 
-The repository contains a validated service definition and signal-handling tests.
-The implementation session has not installed, enabled, or started the live unit,
-performed a service failure/recovery test, rebooted the Pi, or changed its power
-configuration. Those operations require the user's approval under Sprint 1
-Phase D. The commands below prepare a concrete supervised deployment procedure.
+The validated service was installed, enabled, and started after explicit approval
+on 12 October 2026. A 120-second observation confirmed a constant PID, zero
+restarts, and clean startup logs. Sprint 2 found the same PID (7480) and zero
+restarts. No service failure/recovery test, reboot, or power-restoration test has
+been performed. Further live service changes require approval; Sprint 2 preserves
+the running unit without restart.
+
+Source and standalone CLI version is now 0.3.0. The existing service retains its
+already imported v0.2.0 code. Audio runs only through explicit standalone CLI
+commands; `run` never starts capture. See [audio operations](audio.md) for hardware
+tests and SSH versus service-access observations.
 
 The unit targets Debian 12, systemd 252, the existing `user` account, and
 `/home/user/voice-assistant/.venv/bin/python`. It is a system service running as
@@ -72,10 +78,11 @@ systemd-analyze verify deploy/systemd/jarvis.service
 ```
 
 The editable install uses existing Debian build tools without downloads or
-package upgrades. The target version is 0.2.0. Review `git status` and any existing
+package upgrades. The source/CLI version is 0.3.0. Review `git status` and existing
 service configuration before deployment. If a live unit already exists, inspect
 `systemctl cat jarvis.service` and save its unit and any drop-ins before replacing
-them. The implementation audit found no existing Jarvis unit.
+them. The original Sprint 1 audit found no unit; it is now installed. Obtain
+approval before replacing or restarting this existing deployment.
 
 ## Install, enable, and start — after approval
 
@@ -205,9 +212,10 @@ verification. These steps have not been executed during implementation.
 
 - No output: check the unit name, current boot filter, journal permissions, and
   effective log level. Use `sudo journalctl` if access is denied.
-- An active process with no voice response: this core intentionally provides no
-  audio or AI functionality. `python -m jarvis status` describes a separate
-  short-lived instance; use systemctl/journalctl to inspect the managed process.
+- An active process with no voice response: the managed standby core does not
+  start audio or AI. Audio requires an explicit standalone CLI command.
+  `python -m jarvis status` describes a separate short-lived instance; use
+  systemctl/journalctl to inspect the managed process.
 
 ## Reboot and power restoration — separate supervised tests
 
