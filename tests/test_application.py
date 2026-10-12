@@ -1,11 +1,13 @@
 """Lifecycle boundaries, central dispatch, and controlled shutdown."""
 
+import signal
 import unittest
 from unittest.mock import patch
 
 from jarvis.application import Application, ApplicationError, ApplicationState
 from jarvis.config import AppConfig
 from jarvis.dispatch import HandlerError
+from jarvis.signals import ShutdownRequest
 
 
 class ApplicationTests(unittest.TestCase):
@@ -110,3 +112,31 @@ class ApplicationTests(unittest.TestCase):
                 application.dispatch("hello"),
                 "Hello. Jarvis core is operational.",
             )
+
+    def test_repeated_shutdown_requests_have_one_stop_transition(self) -> None:
+        with self.assertLogs("jarvis.application", level="INFO") as logs:
+            with Application(AppConfig()) as application:
+                application.request_shutdown()
+                application.request_shutdown()
+                application.run()
+                application.shutdown()
+                application.shutdown()
+        self.assertIs(application.state, ApplicationState.STOPPED)
+        self.assertEqual(
+            sum("running -> stopped" in line for line in logs.output), 1
+        )
+
+    def test_signal_before_run_is_honored_without_waiting(self) -> None:
+        request = ShutdownRequest(signum=signal.SIGTERM)
+        with self.assertLogs("jarvis.application", level="INFO") as logs:
+            with Application(AppConfig()) as application:
+                with patch.object(
+                    application._shutdown_requested,
+                    "wait",
+                    side_effect=AssertionError("should not wait after signal"),
+                ):
+                    application.run(request)
+        self.assertIs(application.state, ApplicationState.STOPPED)
+        self.assertTrue(
+            any("Received SIGTERM" in line for line in logs.output)
+        )

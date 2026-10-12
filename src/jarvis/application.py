@@ -1,6 +1,7 @@
 """Explicit lifecycle for a single, synchronous application process."""
 
 import logging
+import signal
 from enum import Enum
 from threading import Event
 from types import TracebackType
@@ -8,6 +9,7 @@ from types import TracebackType
 from jarvis.config import AppConfig
 from jarvis.dispatch import CommandDispatcher
 from jarvis.modules.demo import register as register_demo
+from jarvis.signals import ShutdownRequest
 
 logger = logging.getLogger(__name__)
 
@@ -71,12 +73,23 @@ class Application:
         logger.debug("Dispatching command %r", name)
         return self.dispatcher.dispatch(name)
 
-    def run(self) -> None:
-        """Wait until shutdown is requested or Ctrl+C is received."""
+    def run(self, signals: ShutdownRequest | None = None) -> None:
+        """Wait for cooperative shutdown, optionally consuming scoped signals.
+
+        This method never installs process handlers. Signal callbacks only
+        record intent, so Event's locks are accessed here in normal execution.
+        """
         self._require_running()
         try:
-            while not self._shutdown_requested.wait(timeout=1.0):
-                pass
+            while not self._shutdown_requested.is_set():
+                if signals is not None and signals.signum is not None:
+                    logger.info(
+                        "Received %s; requesting shutdown",
+                        signal.Signals(signals.signum).name,
+                    )
+                    self.request_shutdown()
+                else:
+                    self._shutdown_requested.wait(timeout=1.0)
         except KeyboardInterrupt:
             logger.info("Interrupt received; shutting down")
             self.request_shutdown()

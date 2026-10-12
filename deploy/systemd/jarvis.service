@@ -1,0 +1,25 @@
+[Unit]
+Description=Jarvis personal assistant core
+StartLimitIntervalSec=300
+StartLimitBurst=5
+
+[Service]
+Type=exec
+User=user
+Group=user
+WorkingDirectory=/home/user/voice-assistant
+ExecStart=/home/user/voice-assistant/.venv/bin/python -m jarvis run
+Environment=PYTHONUNBUFFERED=1
+Environment=JARVIS_LOG_LEVEL=INFO
+Restart=on-failure
+RestartSec=10s
+TimeoutStopSec=15s
+KillSignal=SIGTERM
+KillMode=control-group
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

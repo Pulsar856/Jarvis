@@ -1,4 +1,4 @@
-# Jarvis architecture — Sprint 0
+# Jarvis architecture — Sprints 0 and 1
 
 ## Philosophy and implementation boundary
 
@@ -9,8 +9,10 @@ package, rather than depending on the repository working directory.
 
 The implemented system has CLI commands, validated configuration, logging,
 lifecycle management, named synchronous dispatch, and a demonstration module.
-The module registration function is an implemented extension convention. Audio,
-AI providers, devices, persistence, automation, and service operation are future
+Sprint 1 adds scoped Linux shutdown signals and a prepared systemd unit. Actual
+service installation and boot/failure-recovery verification are deployment tasks
+pending approval. The module registration function is an implemented extension
+convention. Audio, AI providers, devices, persistence, and automation are future
 concepts; there are no placeholder adapters or interfaces for them.
 
 ## Component responsibilities and dependency direction
@@ -19,10 +21,12 @@ concepts; there are no placeholder adapters or interfaces for them.
 | --- | --- | --- |
 | `__init__.py` | Canonical version constant | None |
 | `__main__.py` | Exit using the CLI's result | `cli` |
-| `cli.py` | Parse arguments, compose setup, format results and expected errors | `application`, `config`, `dispatch`, `logging`, version |
+| `cli.py` | Parse arguments, compose setup and scoped signals, format results and expected errors | `application`, `config`, `dispatch`, `logging`, `signals`, version |
 | `config.py` | Validate immutable settings and documented environment overrides | Version |
 | `logging.py` | Own handlers on the `jarvis` logger namespace | `config` |
-| `application.py` | Own config, dispatcher, lifecycle state, and shutdown signal; register concrete modules | `config`, `dispatch`, `modules.demo` |
+| `application.py` | Own config, dispatcher, lifecycle state, and cooperative shutdown; consume recorded signals; register modules | `config`, `dispatch`, `modules.demo`, `signals` |
+| `signals.py` | Temporarily own SIGINT/SIGTERM callbacks; record stop intent and restore previous handlers | None |
+| `deploy/systemd/jarvis.service` | Define Linux process supervision, boot enablement, journal output, and restart limits | Installed CLI and interpreter paths |
 | `dispatch.py` | Register handlers and return results with explicit errors | None |
 | `modules/demo.py` | Implement and register the actual `hello` action | `dispatch` |
 
@@ -109,7 +113,7 @@ The controller exposes read-only state and these public operations:
 | Construction | Prepare configuration, command registry, and shutdown signal in `initialized`. |
 | `start()` | Allow `initialized -> running` once; reject repeat starts. |
 | `dispatch(name)` | Require `running`; return the registered handler's result. |
-| `run()` | Require `running`; wait until shutdown is requested or Ctrl+C occurs. |
+| `run(signals=None)` | Require `running`; wait for cooperative stop, optional recorded SIGINT/SIGTERM, or a direct KeyboardInterrupt. |
 | `request_shutdown()` | Set the cooperative shutdown signal and wake a waiting run loop. |
 | `shutdown()` | Idempotently signal shutdown and transition to `stopped`. |
 | Context manager | Start on entry and always shut down on exit; propagate exceptions. |
@@ -117,22 +121,92 @@ The controller exposes read-only state and these public operations:
 Normal lifecycle: `initialized -> running -> stopped`. An ordinary exception
 leaving the context produces `running -> failed -> stopped`. The failed state
 is recorded in logs before cleanup; the stopped state does not imply success.
-The original exception still propagates. Ctrl+C requests shutdown and is not
-recorded as an application failure. A stopped application cannot be restarted;
-construct another instance for a new lifecycle.
+The original exception still propagates. Handled SIGINT and SIGTERM request
+shutdown and are not recorded as application failures. Repeated requests and
+`shutdown()` calls produce one transition to `stopped`. A stopped application
+cannot be restarted; construct another instance for a new lifecycle.
 
-The run loop uses `threading.Event.wait(timeout=1.0)` as a blocking shutdown
+The run loop retains `threading.Event.wait(timeout=1.0)` as its blocking shutdown
 primitive. It creates no threads or workers and sleeps between checks, with at
-most one timeout wake per second. The finite wait also keeps signal handling
-responsive on platforms whose waits are less interruptible. This is not an
-event processing loop. It cannot receive interactive CLI commands while waiting.
-The CLI lifecycle context performs final cleanup after `run()` returns.
+most one timeout wake per second. Recorded process signals are consumed in normal
+loop execution, which logs the signal and calls the existing `request_shutdown()`
+method. The finite wait bounds normal idle-loop signal response to approximately
+one second. No interactive commands are processed while waiting. The lifecycle
+context performs final cleanup after `run()` returns.
+
+### Scoped Linux signals
+
+Only the CLI's persistent `run` command installs handlers. An `ExitStack` owns
+`capture_shutdown_signals()` across configuration, startup, execution, application
+shutdown, and logging cleanup. Its callbacks only record the first SIGINT/SIGTERM
+in `ShutdownRequest`; repeated signals keep the same stop intent. They perform
+no logging, locking, cleanup, or exception raising. In particular, invoking
+`Event.set()` inside a signal callback could interrupt code already holding
+Event's non-reentrant lock. Recording intent avoids that deadlock.
+
+Python invokes signal callbacks on its main thread and permits handler
+installation only there; see the [Python 3.11 signal documentation](https://docs.python.org/3.11/library/signal.html#signals-and-threads).
+Installation errors are explicit CLI failures. The scope restores previous
+handlers after all owned cleanup, even if execution fails. Partial installation
+is rolled back. Foreign handlers reported by Python as `None` are rejected
+before replacement because they cannot be restored through Python's API.
+
+`Application.run()` alone installs no handlers, preserving embedding behavior
+and the v0.1.0 API. It still catches a directly raised `KeyboardInterrupt`.
+An embedding application may explicitly opt in using:
+
+```python
+from jarvis.application import Application
+from jarvis.config import AppConfig
+from jarvis.signals import capture_shutdown_signals
+
+with capture_shutdown_signals() as signals:
+    with Application(AppConfig.from_env()) as application:
+        application.run(signals)
+```
+
+The caller retains ownership of its logging setup and teardown. One-shot CLI
+commands do not alter process signal handlers. SIGKILL and power loss cannot
+run Python cleanup. Shutdown latency for future blocking handlers or resource
+cleanup is not guaranteed by the idle-loop bound.
 
 The CLI parses help/version before loading settings. One-shot `status` and `demo`
 commands enter the same lifecycle context as `run`. `status` describes that
 new application instance, not another process. Known failures produce exit 1,
-usage errors exit 2, and normal completion or Ctrl+C exit 0. Unexpected programming
+usage errors exit 2, and normal completion, SIGINT, or SIGTERM exit 0. Unexpected programming
 errors retain their traceback after lifecycle and logging cleanup.
+
+## Systemd service boundary
+
+The system manager launches one foreground Python process as `user`, with the
+repository working directory and existing virtual environment interpreter.
+`Type=exec` detects interpreter execution failures. It does not implement an
+application readiness notification or health watchdog. No shell activation,
+daemon fork, PID file, graphical session, or network-online dependency is needed.
+
+`WantedBy=multi-user.target` provides normal boot activation once explicitly
+enabled. `Restart=on-failure` leaves successful exits and operator stops stopped.
+Unexpected nonzero exits or process failures are retried after ten seconds.
+Start limiting permits five starts within 300 seconds, including manual starts;
+exhaustion leaves the unit failed until an operator fixes the cause and retries.
+There is no Python process supervisor or automatic host reboot policy.
+
+Systemd sends SIGTERM to the unit's control group and allows fifteen seconds for
+shutdown; after that it can use SIGKILL. Both stdout and stderr go to the journal,
+with unbuffered Python output. Optional application file logging remains available
+for manual use. `NoNewPrivileges=true` prevents privilege gains, and `UMask=0077`
+makes newly created service files private by default. There are no credentials
+or extra capabilities in the unit.
+
+The deployment paths are specific to this Pi and must be reviewed when moving
+the service elsewhere; application logic remains path independent. The unit is
+version controlled and syntax validated, but not installed or enabled during
+implementation. [Operations](operations.md) covers approval, deployment, updates,
+logs, failure/reboot verification, and rollback. Existing SSH, Tailscale, audio,
+Bluetooth, camera, and other services are not reconfigured.
+
+Version 0.2.0 is an additive minor release for service operation. Existing CLI
+commands and module registration contracts remain compatible with v0.1.0.
 
 ## Add a module in an independent development stream
 
@@ -203,11 +277,13 @@ documentation when independent development streams integrate.
 Argparse, dataclasses, logging, and unittest meet the current needs. There is no
 web framework, network server, distributed message bus, persistent queue,
 database, workflow engine, async runtime, microservice, plugin discovery system,
-or secret-management platform. None solves a concrete Sprint 0 requirement.
+or secret-management platform. None solves a concrete current requirement.
 Previously installed third-party packages are not imported by Jarvis. Build-time
 setuptools and wheel are declared separately from the empty runtime dependency
-list. No audio, Bluetooth, network, systemd, or administrator configuration is
-changed by the application.
+list. Linux process supervision is handled by systemd rather than a new Python
+framework. The application itself changes no audio, Bluetooth, network, systemd,
+or administrator configuration; installing the prepared unit is a separate,
+approved operational action.
 
 ## Verification conventions
 
@@ -216,12 +292,17 @@ Configuration tests use explicit mappings or isolated environments. Dispatch
 tests check exact results, duplicates, unknown names, exception chaining, and
 recovery. Lifecycle tests verify state guards, cleanup after failure, controlled
 shutdown, and dispatch routing. CLI subprocesses have timeouts; the POSIX run
-test waits for readiness before sending SIGINT, then kills a lingering child
-if necessary. Logging tests use temporary directories and capture stderr.
+tests wait for readiness before sending real SIGINT or SIGTERM, then kill a
+lingering child if necessary. Signal tests check repeated requests, previous
+handler restoration, partial setup rollback, failure exit codes, and logging
+cleanup. Logging tests use temporary directories and capture stderr. Unit syntax
+is checked with a bounded `systemd-analyze verify` subprocess when supported,
+without starting or installing the service.
 
 Run `python -m compileall -q src tests` and `python -m pip check` for syntax
 and environment consistency. CLI tests also verify installed package imports
 outside the repository. Keep tests and the default application offline.
-The planned next step is optional audio discovery and bounded record/playback,
-with explicit resource cleanup; cloud conversation follows only after that local
-path is validated.
+Live service stop/restart, failure recovery, reboot, and hardware power-restoration
+tests are separate supervised operations and have not been claimed as automated
+test results. Sprint 1 ends with deployment readiness; no audio or AI work is
+included.

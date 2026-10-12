@@ -5,12 +5,14 @@ import logging
 import platform
 import sys
 from collections.abc import Sequence
+from contextlib import ExitStack
 
 from jarvis import __version__
 from jarvis.application import Application, ApplicationError
 from jarvis.config import AppConfig, ConfigurationError
 from jarvis.dispatch import DispatchError
 from jarvis.logging import close_logging, configure_logging
+from jarvis.signals import SignalHandlingError, capture_shutdown_signals
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -25,7 +27,7 @@ def build_parser() -> argparse.ArgumentParser:
         "status", help="show configuration and runtime information"
     )
     commands.add_parser("demo", help="execute the built-in hello command")
-    commands.add_parser("run", help="run persistently until Ctrl+C")
+    commands.add_parser("run", help="run until Ctrl+C or SIGTERM")
     return parser
 
 
@@ -54,29 +56,37 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command is None:
         parser.print_help()
         return 0
-    try:
-        config = AppConfig.from_env()
-        configure_logging(config)
-        with Application(config) as application:
-            if args.command == "status":
-                show_status(application)
-            elif args.command == "demo":
-                print(application.dispatch("hello"))
-            else:
-                print(
-                    f"{config.app_name} {config.app_version} running. "
-                    "Press Ctrl+C to stop.",
-                    flush=True,
-                )
-                application.run()
-        return 0
-    except KeyboardInterrupt:
-        logging.getLogger(__name__).info("Interrupt received; shutting down")
-        return 0
-    except (
-        ConfigurationError, ApplicationError, DispatchError, OSError
-    ) as exc:
-        print(f"jarvis: {exc}", file=sys.stderr)
-        return 1
-    finally:
-        close_logging()
+    with ExitStack() as process_scope:
+        try:
+            signals = (
+                process_scope.enter_context(capture_shutdown_signals())
+                if args.command == "run" else None
+            )
+            config = AppConfig.from_env()
+            configure_logging(config)
+            with Application(config) as application:
+                if args.command == "status":
+                    show_status(application)
+                elif args.command == "demo":
+                    print(application.dispatch("hello"))
+                else:
+                    print(
+                        f"{config.app_name} {config.app_version} running. "
+                        "Press Ctrl+C to stop.",
+                        flush=True,
+                    )
+                    application.run(signals)
+            return 0
+        except KeyboardInterrupt:
+            logging.getLogger(__name__).info(
+                "Interrupt received; shutting down"
+            )
+            return 0
+        except (
+            ConfigurationError, ApplicationError, DispatchError,
+            SignalHandlingError, OSError,
+        ) as exc:
+            print(f"jarvis: {exc}", file=sys.stderr)
+            return 1
+        finally:
+            close_logging()

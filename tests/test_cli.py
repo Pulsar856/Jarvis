@@ -109,6 +109,19 @@ class CliTests(unittest.TestCase):
 
     @unittest.skipUnless(os.name == "posix", "SIGINT pipe test targets POSIX")
     def test_run_starts_and_ctrl_c_stops_cleanly(self) -> None:
+        self.assert_run_signal(signal.SIGINT)
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM pipe test targets POSIX")
+    def test_run_sigterm_stops_cleanly_and_flushes_file_logs(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            self.environ["JARVIS_LOG_DIR"] = directory
+            self.assert_run_signal(signal.SIGTERM)
+            logs = (Path(directory) / "jarvis.log").read_text(encoding="utf-8")
+        self.assertIn("Received SIGTERM", logs)
+        self.assertEqual(logs.count("running -> stopped"), 1)
+
+    def assert_run_signal(self, signum: signal.Signals) -> None:
+        """Send a real OS signal only after readiness, with bounded cleanup."""
         process = subprocess.Popen(
             [sys.executable, "-m", "jarvis", "run"],
             stdout=subprocess.PIPE,
@@ -124,10 +137,13 @@ class CliTests(unittest.TestCase):
                 )
                 ready = os.read(process.stdout.fileno(), 4096)
             self.assertIn(b"Press Ctrl+C to stop.", ready)
-            process.send_signal(signal.SIGINT)
+            process.send_signal(signum)
             output, errors = process.communicate(timeout=5)
             self.assertEqual(process.returncode, 0, errors.decode("utf-8"))
-            self.assertIn(b"running -> stopped", errors)
+            self.assertIn(f"Received {signum.name}".encode(), errors)
+            self.assertEqual(errors.count(b"initialized -> running"), 1)
+            self.assertEqual(errors.count(b"running -> stopped"), 1)
+            self.assertNotIn(b"-> failed", errors)
             self.assertNotIn(b"Traceback", ready + output + errors)
         finally:
             if process.poll() is None:
