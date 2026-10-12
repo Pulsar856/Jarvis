@@ -1,4 +1,4 @@
-# Jarvis architecture — Sprints 0–2
+# Jarvis architecture — Sprints 0–3
 
 ## Philosophy and implementation boundary
 
@@ -10,9 +10,10 @@ package, rather than depending on the repository working directory.
 The implemented system has CLI commands, validated configuration, logging,
 lifecycle management, named synchronous dispatch, and a demonstration module.
 Sprint 1 adds scoped Linux shutdown signals and a now-deployed systemd unit.
-Sprint 2 adds optional device discovery and bounded WAV operations. Boot and
+Sprint 2 adds optional device discovery and bounded WAV operations. Sprint 3 adds
+raw PCM streaming with bounded handoff and subordinate resource ownership. Boot and
 failure-recovery checks remain future operational work. Module registration is
-an implemented extension convention. Streaming audio, AI providers, other device
+an implemented extension convention. AI providers, other device
 adapters, persistence, and automation remain future concepts without placeholder
 interfaces.
 
@@ -34,6 +35,12 @@ interfaces.
 | `audio/backend.py` | ALSA subprocesses, deadlines, reaping, and Jabra playback conversion | Audio devices/errors, `signals` |
 | `audio/operations.py` | WAV validation and file transactions; record/play/loopback | Audio backend/devices/errors, `signals` |
 | `audio/cli.py` | Audio arguments, environment selectors, and terminal output | Audio backend/devices/operations/errors |
+| `audio/frames.py` | Validated immutable PCM format, payload, and ordering metadata | Audio errors |
+| `audio/control.py` | Programmatic cancellation, recorded signal consumption, bounded waits | Audio errors, `signals` |
+| `audio/buffers.py` | Finite FIFO, overflow policy, loss and wait accounting | PCM frames/control/errors |
+| `audio/streaming.py` | Raw ALSA pipes, partial I/O, process ownership, transport metrics | Existing backend/device helpers, PCM frames/control/errors |
+| `audio/session.py` | Subordinate lifecycle, worker ownership, bounded buffers, failure propagation | PCM transport/buffers/control, device selection |
+| `audio/stream_cli.py` | Explicit bounded capture, silent playback, sequential replay, metrics output | PCM sessions/frames, existing discovery |
 
 Modules should not import the CLI or application controller. The application
 is the composition point that imports each concrete module's registrar.
@@ -209,14 +216,14 @@ or extra capabilities in the unit.
 The deployment paths are specific to this Pi and must be reviewed when moving
 the service elsewhere; application logic remains path independent. The unit is
 version controlled, syntax validated, and installed/enabled after Sprint 1
-approval. Sprint 2 does not restart or alter it; the running service retains its
-already loaded v0.2.0 code while new CLI processes use v0.3.0.
+approval. Sprints 2 and 3 do not restart or alter it; the running service retains
+its loaded v0.2.0 code while new CLI processes use v0.4.0.
 [Operations](operations.md) covers approval, deployment, updates,
 logs, failure/reboot verification, and rollback. Existing SSH, Tailscale, audio,
 Bluetooth, camera, and other services are not reconfigured.
 
-Version 0.3.0 adds optional audio. Existing CLI, lifecycle, and module registration
-contracts remain compatible with v0.2.0.
+Version 0.4.0 adds streaming alongside the v0.3.0 WAV subsystem. Existing CLI,
+lifecycle, and module registration contracts remain compatible.
 
 ## Optional bounded audio
 
@@ -258,7 +265,7 @@ physically checked on SPEAK 510; other Jabra models remain unverified.
 
 Loopback resolves both endpoints before capture, records and plays serially in a
 private temporary directory, and removes that directory on every exit path.
-There is no simultaneous monitoring, continuous listening, or live streaming.
+This WAV workflow does not perform simultaneous monitoring or live streaming.
 
 Child processes use fixed utility names resolved at invocation, argument
 sequences, no shell, disabled stdin, and a private process group. Discovery has
@@ -271,6 +278,55 @@ Captured PCM goes only to private files, never application logs or CLI stdout.
 `JARVIS_AUDIO_INPUT` and `JARVIS_AUDIO_OUTPUT` are read only by audio commands;
 CLI flags take precedence. Their validation cannot block the generic core. No
 profiles, servers, Python dependencies, or audio-session supervisors are added.
+
+## Optional PCM streaming
+
+The file-based system is preserved. `StreamSession` composes capture and/or
+playback as resources inside an explicit CLI operation or future module. It does
+not register a background action or replace `Application`. No streaming starts
+in `run`, and session construction has no device side effects.
+
+`PCMFormat` describes logical interleaved S16_LE audio, with validated rates,
+channels, and 10–100 ms frames containing integral sample counts. `PCMFrame`
+carries exact immutable bytes, an increasing sequence, and an optional monotonic
+assembly timestamp. The default is 16 kHz mono, 20 ms, 320 samples, 640 bytes.
+Frames contain no WAV headers; repr excludes the payload.
+
+Each direction uses one continuous utility process and one owning worker. Raw
+capture reads stdout incrementally; playback writes stdin incrementally and
+drains on explicit finish. Nonblocking descriptors and selectors preserve partial
+I/O, drain bounded stderr, and check cancellation every 50 ms while waiting.
+Processes use private groups, existing selection and termination helpers, and
+the shared Jabra playback conversion policy. No asyncio or new dependency is used.
+
+The default FIFO holds ten frames. Capture drops oldest on overflow to favor
+freshness, reporting loss and preserving sequence gaps. Playback waits with a
+deadline or rejects admission; it never silently drops accepted speech. Abort
+discards are separately counted. An idle playback worker checks backend exit at
+least every 250 ms. An explicit finish drains queued frames and waits for the
+backend; an explicit stop aborts instead. All worker threads are joined and
+owned children reaped, including partial-startup failures.
+
+Session states are `initialized -> starting -> running -> stopping -> stopped`.
+Actual errors record `failed` before cleanup and remain available in metrics and
+the propagated exception. Signals and programmatic stop remain cancellation.
+The core's scoped callbacks still only record signal intent; `StreamControl`
+sets its Event only in ordinary execution. Context exit surfaces worker errors
+even if the owner did not observe them through a read or write.
+
+Application queues, partial-frame memory, kernel pipes, and diagnostic retention
+are bounded. ALSA is asked for one frame per period and four periods of buffering.
+Python requests minimum-size pipes; the audited kernel rounds them to its 16 KiB
+page size. Conversion and device buffers add latency beyond frame size. Metrics
+report actual pipe capacity, complete frames/bytes, queue waits and occupancy,
+loss, process startup, first pipe acceptance, active time, and cleanup. Those
+timings do not establish acoustic latency.
+
+CLI tests are bounded to 1–30 seconds. Capture defaults to metrics-only output.
+Playback requires `stream-play-test` (silence) or explicit `stream-test --replay`,
+which closes capture before replay and retains only bounded PCM in memory.
+[The streaming guide](audio-streaming.md) documents the API, negotiated hardware
+formats, actual verification, limitations, and future conversational extension.
 
 ## Add a module in an independent development stream
 
@@ -327,8 +383,9 @@ code should remain outside generic dispatch and configuration logic. Prefer
 composing concrete Python modules over an automatic plugin framework.
 
 When an adapter first owns a persistent resource, add the smallest explicit
-startup/cleanup contract needed and test partial-startup failures. When streaming
-or concurrent I/O becomes a requirement, evaluate asyncio and cancellation then.
+startup/cleanup contract needed and test partial-startup failures. PCM concurrency
+currently uses subordinate workers and selectors. Future network adapters may
+choose their own concurrency model while preserving cancellation and ownership.
 The current synchronous handlers provide no timeout or task isolation, so do not
 silently put an indefinitely blocking adapter behind them.
 
@@ -367,11 +424,16 @@ without starting or installing the service. Audio tests use synthetic WAV files,
 fake utilities, and mocks without opening microphones. Separate physical checks
 validate PCM state, WAV metadata, playback timing, and temporary cleanup. The
 user was away during testing, so audible confirmation remains pending.
+Streaming tests use fake utilities and synthetic real pipe processes. Sustained
+production and slow consumers verify finite capacity and accounting; startup,
+timeout, signal, and stop tests verify no leaked workers or child processes.
+Separate physical tests exercised raw capture, silent playback, cancellation,
+and simultaneous capture with silence-only output; no captured voice was replayed.
 
 Run `python -m compileall -q src tests` and `python -m pip check` for syntax
 and environment consistency. CLI tests also verify installed package imports
 outside the repository. Keep tests and the default application offline.
 Live service stop/restart, failure recovery, reboot, and hardware power-restoration
 tests are separate supervised operations and have not been claimed as automated
-test results. Sprint 2 ends at bounded local audio. Streaming, providers,
-recognition, and Bluetooth remain future work.
+test results. Sprint 3 ends at local streaming. Providers, recognition,
+automatic hotplug recovery, and Bluetooth remain future work.

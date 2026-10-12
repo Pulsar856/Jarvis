@@ -5,6 +5,10 @@ and `run` retain their existing behavior. Importing modules, starting the core,
 or starting the systemd service does not open a microphone. Audio commands need
 no network connection, account, credential, or Python audio dependency.
 
+These WAV commands are preserved in v0.4.0. Sprint 3 adds separate raw PCM
+operations documented in [audio streaming](audio-streaming.md); the format and
+file-safety rules below still describe the WAV subsystem.
+
 ## Audited Raspberry Pi environment
 
 The audit on 12 October 2026 found Debian 12 ARM64, Python 3.11.2, ALSA
@@ -263,16 +267,20 @@ Any future live service update or restart requires explicit approval. See
 [operations](operations.md) for read-only journal/status checks and deployment.
 No reboot, power cycle, or service-failure recovery test was performed.
 
-## Future streaming path
+## Streaming and future adapters
 
-This backend deliberately exposes bounded file operations. Future work can add
-a small separate PCM-frame contract for capture and playback, carrying explicit
-rate, sample width, channels, cancellation, deadlines, and resource ownership.
-The discovery/selection boundary can remain while a streaming backend replaces
-the utility/file transport. That work must address backpressure, interruption,
-low latency, reconnection, and coordination with the existing user audio server.
-It is a proposed next increment, not an implemented feature. There is no speech
-recognition, wake word, AI integration, Bluetooth handling, or network exposure.
+The file backend deliberately retains bounded WAV operations. Sprint 3 adds a
+separate immutable PCM-frame contract, raw pipe capture/playback, finite buffers,
+session ownership, cancellation, and metrics, using the same device selectors
+and Jabra conversion helper. It creates no temporary WAVs. See
+[audio streaming](audio-streaming.md) for implemented commands and physical tests.
+
+Future work can consume and produce those frames through `StreamSession` while
+owning provider-specific networking, rate adaptation, and turn/interrupt policy.
+Automatic reconnection and coordination with the user audio server remain
+unimplemented. There is no recognition, wake word, AI integration, Bluetooth
+handling, or network exposure. The live service remains untouched in Sprint 3;
+its loaded code is v0.2.0 while new CLI processes use v0.4.0.
 
 References: [ALSA utility options](https://github.com/alsa-project/alsa-utils/blob/v1.2.8/aplay/aplay.1),
 [Python 3.11 WAV reader](https://docs.python.org/3.11/library/wave.html), and

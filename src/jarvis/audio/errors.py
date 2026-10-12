@@ -31,3 +31,7 @@ class AudioCancelled(AudioError):
     def __init__(self, signum: int) -> None:
         self.signum = signum
         super().__init__("Audio operation cancelled; resources released.")
+
+
+class StreamCancelled(AudioError):
+    """An owner requested programmatic cancellation of a PCM session."""

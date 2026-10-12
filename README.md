@@ -2,28 +2,30 @@
 
 Jarvis is a modular personal assistant intended to run primarily on a Raspberry
 Pi 5. The long-term vision includes voice conversation, interchangeable AI
-providers, device control, and automation. **Sprints 0–2 implement an offline
-core, Linux service operation, and optional local USB audio.** Core commands need
-no hardware or API key. Explicit audio commands need local ALSA utilities and the
+providers, device control, and automation. **Sprints 0–3 implement an offline
+core, Linux service operation, and optional local WAV/PCM audio.** Core commands
+need no hardware or API key. Explicit audio commands need local ALSA utilities and the
 selected device; they never contact cloud services.
 
 ## Current status
 
-Version 0.3.0 provides standard Python packaging, a command-line interface,
+Version 0.4.0 provides standard Python packaging, a command-line interface,
 validated environment configuration, console and optional file logging, an
 explicit application lifecycle, and synchronous command dispatch. The built-in
 `hello` handler demonstrates the module convention. There are no runtime
 dependencies beyond the Python standard library. Sprint 1 adds graceful SIGINT
 and SIGTERM shutdown and a systemd service. Sprint 2 adds device discovery,
-bounded PCM WAV recording/playback, and a temporary-file loopback test.
+bounded PCM WAV recording/playback, and a temporary-file loopback test. Sprint 3
+adds incremental raw PCM capture/playback, bounded buffers, cancellation, session
+ownership, and metrics.
 
 The approved service deployment was installed, enabled, and started on
-12 October 2026. Sprint 2 found it still running with its original PID and zero
+12 October 2026. Sprints 2 and 3 found it running with its original PID and zero
 restarts. It has not been stopped, restarted, or reconfigured for audio. Its
-already imported code remains v0.2.0; newly launched CLI processes use v0.3.0.
+already imported code remains v0.2.0; newly launched CLI processes use v0.4.0.
 Reboot, power-restoration, and service failure/recovery tests remain unperformed.
 
-The minor increment to 0.3.0 reflects the optional audio subsystem. Existing
+The minor increment to 0.4.0 reflects the streaming subsystem. Existing
 CLI commands and application/dispatch APIs remain compatible.
 
 The primary environment is Raspberry Pi 5, Debian 12 Bookworm, ARM64/aarch64,
@@ -146,6 +148,47 @@ incomplete temporary data. Audio cancellation returns 130 for SIGINT or 143 for
 SIGTERM; core `run` shutdown remains exit 0. No audio starts automatically in
 `run` or the systemd service.
 
+## Explicit PCM streaming
+
+```bash
+python -m jarvis audio stream-info
+python -m jarvis audio stream-test --duration 5
+python -m jarvis audio stream-play-test --duration 2
+```
+
+`stream-info` opens no devices. `stream-test` captures fixed PCM frames and
+reports metrics, with no speaker output or saved audio. `stream-play-test` sends
+bounded silence through the playback transport. To speak and hear a replay when
+near the Pi, explicitly enable sequential replay:
+
+```bash
+python -m jarvis audio stream-test --duration 5 --replay
+```
+
+Capture closes before replay begins; there is no acoustic feedback route. Replay
+retains at most the requested duration in memory and creates no WAV files.
+Durations are 1–30 seconds, rounded down to whole frames, with an overall deadline
+of duration plus five seconds per stage. `run` never starts a stream.
+
+The default logical format is S16_LE, 16000 Hz, mono, 20 ms: 320 samples and
+640 bytes per frame. Optional flags configure `--sample-rate`, `--channels`,
+`--frame-ms`, `--buffer-frames`, `--io-timeout`, and input/output selectors.
+Defaults are ten queue slots and a two-second I/O timeout. Capture drops the
+oldest queued frame on overflow and counts loss; playback waits or raises a
+timeout without silently dropping admitted audio. SIGINT/SIGTERM return 130/143
+after owned workers and child processes are released.
+
+The physical Jabra produced all 250 frames of a five-second test with zero drops;
+the first frame arrived in 36.5 ms. Two seconds of silent output drained in
+2.044 seconds at native 48 kHz stereo. A separate two-second simultaneous capture
+and silence-only playback test passed; captured audio was never routed to the
+speaker. Those are transport observations, not acoustic latency or sound-quality
+measurements. Human listening remains deferred. The Pi's minimum pipe capacity
+is 16 KiB, so buffering limits still matter for future latency work.
+
+See [the streaming guide](docs/audio-streaming.md) for the frame API, metrics,
+ownership, actual format negotiation, test scope, and future adapter boundary.
+
 ## Linux service operation
 
 The [systemd unit](deploy/systemd/jarvis.service) uses the system manager
@@ -161,7 +204,8 @@ The unit is **installed, enabled, and running** on the audited Pi. Follow the
 restart/reboot verification, controlled failure testing, and rollback. Manual
 CLI use continues to work independently of systemd. Being alive does not imply
 that the service is listening or providing AI functionality. Do not restart or
-modify the live service for Sprint 2 without explicit approval.
+modify the live service for Sprint 3 without explicit approval. The operations
+guide records the earlier deployment; supervision behavior is unchanged.
 
 ## Configuration
 
@@ -172,7 +216,7 @@ Configuration is loaded once per command and validated before startup.
 | `JARVIS_APP_NAME` | `Jarvis` | Display name; cannot be blank or contain control characters. |
 | `JARVIS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`; case insensitive in the environment. |
 | `JARVIS_LOG_DIR` | Unset | Optional directory; created as needed, with UTF-8 output appended to `jarvis.log`. |
-| Application version | `0.3.0` | Defined by `jarvis.__version__`; not overridden by the environment. |
+| Application version | `0.4.0` | Defined by `jarvis.__version__`; not overridden by the environment. |
 | `JARVIS_AUDIO_INPUT` | `jabra` | Capture selector for explicit audio commands; CLI flags override it. |
 | `JARVIS_AUDIO_OUTPUT` | `jabra` | Playback selector for explicit audio commands; CLI flags override it. |
 
@@ -218,10 +262,12 @@ demo execution, CLI behavior, logging, error handling, scoped signal restoration
 repeated shutdown, graceful SIGINT/SIGTERM shutdown, and optional audio. Audio
 tests use mocks, synthetic WAV files, and fake utilities; the automated suite
 opens no microphone. Real child-process tests verify cancellation, deadlines,
-and reaping. Physical Jabra loopback is a separate, explicit manual test.
+and reaping. Streaming tests add frame contracts, backpressure, partial I/O,
+startup rollback, worker joining, and real signals against synthetic utilities.
+Physical Jabra checks are separate explicit operations.
 CLI subprocess tests have five-second deadlines and kill a lingering child on
-failure. Unit syntax
-validation has a ten-second timeout and runs when the local systemd utility and
+failure. Unit syntax validation has a ten-second timeout and runs when the local
+systemd utility and
 target interpreter are available. None of these checks starts the service.
 File tests use temporary directories. Tests require no keys or hardware and make
 no network calls.
@@ -246,6 +292,12 @@ voice-assistant/
 │   │   ├── backend.py         # ALSA subprocesses, deadlines, and reaping
 │   │   ├── operations.py      # WAV safety, recording, playback, loopback
 │   │   ├── errors.py          # Expected failures and cancellation
+│   │   ├── frames.py          # Immutable S16_LE PCM frame contract
+│   │   ├── control.py         # Cooperative stop and bounded wait validation
+│   │   ├── buffers.py         # Finite handoff and explicit loss accounting
+│   │   ├── streaming.py       # Raw PCM pipe transport and process ownership
+│   │   ├── session.py         # Subordinate workers, lifecycle, and metrics
+│   │   ├── stream_cli.py      # Opt-in bounded streaming diagnostics
 │   │   └── cli.py             # Audio arguments, settings, and output
 │   └── modules/
 │       ├── __init__.py
@@ -254,6 +306,7 @@ voice-assistant/
 ├── docs/architecture.md       # Boundaries and contributor integration guide
 ├── docs/operations.md         # Deployment, journal, recovery, and rollback
 ├── docs/audio.md              # Audio audit, commands, limits, and verification
+├── docs/audio-streaming.md    # PCM API, buffering, metrics, and smoke tests
 ├── deploy/systemd/jarvis.service # Linux service definition; not auto-installed
 ├── config/.gitkeep            # Original skeleton; no active config files
 ├── .gitignore
@@ -280,10 +333,12 @@ functional health.
 SIGKILL and power loss cannot invoke Python cleanup. File rotation remains
 unimplemented; journal retention follows the host's existing journal settings.
 
-Sprint 2 ends at bounded local audio. A proposed next sprint is a small local
-PCM streaming contract with cancellation, hotplug recovery, and coordination
-with the existing audio server. Provider, recognition, and Bluetooth work remain
-separate future topics and are not implemented here.
+Sprint 3 ends at local PCM streaming. Devices that disconnect cause explicit
+errors and cleanup; automatic hotplug recovery and audio-server coordination
+are not implemented. A future conversational adapter can consume/produce
+validated PCM frames through `StreamSession`, while owning its credentials,
+network transport, format conversion, and turn/interrupt policy. Those adapter
+features, recognition, and Bluetooth are not implemented here.
 
 See [the architecture and integration guide](docs/architecture.md) before adding
 a module. That document records the current extension conventions independently

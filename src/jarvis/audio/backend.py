@@ -5,6 +5,7 @@ import shutil
 import signal
 import subprocess
 import time
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 
@@ -20,6 +21,15 @@ CAPTURE_RATE = 16000
 CAPTURE_CHANNELS = 1
 CAPTURE_WIDTH = 2
 JABRA_PLAYBACK_RATE = 48000
+
+
+def playback_pcm(device: AudioDevice) -> str:
+    """Keep the verified Jabra conversion policy shared by WAV and raw I/O."""
+    if device.is_jabra:
+        return (
+            f'samplerate:SLAVE="{device.pcm}",RATE={JABRA_PLAYBACK_RATE}'
+        )
+    return device.pcm
 
 
 def check_cancelled(signals: ShutdownRequest | None) -> None:
@@ -51,9 +61,12 @@ def _stop_process(process: subprocess.Popen[str]) -> None:
 def run_command(
     arguments: list[str], timeout: float,
     signals: ShutdownRequest | None = None,
+    cancel: Callable[[], None] | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run without a shell; kill and reap the private group on interruption."""
     check_cancelled(signals)
+    if cancel is not None:
+        cancel()
     environment = dict(os.environ, LC_ALL="C")
     try:
         process = subprocess.Popen(
@@ -71,6 +84,8 @@ def run_command(
     try:
         while True:
             check_cancelled(signals)
+            if cancel is not None:
+                cancel()
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise AudioTimeout("Audio utility exceeded its deadline.")
@@ -81,6 +96,8 @@ def run_command(
             except subprocess.TimeoutExpired:
                 continue
             check_cancelled(signals)
+            if cancel is not None:
+                cancel()
             return subprocess.CompletedProcess(
                 arguments, process.returncode, output, errors
             )
@@ -129,11 +146,12 @@ class AlsaBackend:
     """Use installed arecord/aplay and named plughw devices."""
 
     def devices(
-        self, direction: Direction, signals: ShutdownRequest | None = None
+        self, direction: Direction, signals: ShutdownRequest | None = None,
+        cancel: Callable[[], None] | None = None,
     ) -> tuple[AudioDevice, ...]:
         name = "arecord" if direction == "capture" else "aplay"
         result = run_command(
-            [utility_path(name), "-l"], 5, signals
+            [utility_path(name), "-l"], 5, signals, cancel
         )
         if "no soundcards found" in result.stderr.casefold():
             return ()
@@ -177,14 +195,9 @@ class AlsaBackend:
         signals: ShutdownRequest | None = None,
     ) -> None:
         """Read WAV format; use verified 48 kHz output for Jabra playback."""
-        pcm = device.pcm
-        if device.is_jabra:
-            pcm = (
-                f'samplerate:SLAVE="{pcm}",RATE={JABRA_PLAYBACK_RATE}'
-            )
         arguments = [
             utility_path("aplay"), "-q", "-N", "--fatal-errors",
-            "-D", pcm, "-t", "wav", str(path),
+            "-D", playback_pcm(device), "-t", "wav", str(path),
         ]
         require_success(
             run_command(arguments, duration + 5, signals), "Playback"

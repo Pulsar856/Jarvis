@@ -8,6 +8,7 @@ from jarvis.audio.backend import AlsaBackend
 from jarvis.audio.devices import Direction, select_device
 from jarvis.audio.errors import AudioValidationError, DeviceNotFound
 from jarvis.audio.operations import AudioService, validate_duration
+from jarvis.audio.stream_cli import add_stream_commands, run_stream_command
 from jarvis.signals import ShutdownRequest
 
 
@@ -31,6 +32,7 @@ def add_audio_commands(commands: argparse._SubParsersAction) -> None:
     loopback.add_argument("--duration", type=duration_argument, default=5)
     loopback.add_argument("--input-device", help="capture ID or 'jabra'")
     loopback.add_argument("--output-device", help="playback ID or 'jabra'")
+    add_stream_commands(audio, duration_argument)
 
 
 def configured_device(
@@ -60,6 +62,15 @@ def run_audio(
     arguments: argparse.Namespace, signals: ShutdownRequest | None
 ) -> None:
     """Display discovery separately from configured selection and health."""
+    if arguments.audio_command.startswith("stream-"):
+        run_stream_command(
+            arguments, signals,
+            configured_device(
+                "capture", getattr(arguments, "input_device", None)
+            ),
+            configured_device("playback", arguments.output_device),
+        )
+        return
     backend = AlsaBackend()
     if arguments.audio_command == "record":
         selector = configured_device("capture", arguments.device)
