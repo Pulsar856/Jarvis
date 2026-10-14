@@ -1,4 +1,4 @@
-# Jarvis architecture — Sprints 0–3
+# Jarvis architecture — Sprints 0–4
 
 ## Philosophy and implementation boundary
 
@@ -11,11 +11,12 @@ The implemented system has CLI commands, validated configuration, logging,
 lifecycle management, named synchronous dispatch, and a demonstration module.
 Sprint 1 adds scoped Linux shutdown signals and a now-deployed systemd unit.
 Sprint 2 adds optional device discovery and bounded WAV operations. Sprint 3 adds
-raw PCM streaming with bounded handoff and subordinate resource ownership. Boot and
+raw PCM streaming with bounded handoff and subordinate resource ownership.
+Sprint 4 composes an optional Gemini Live adapter and bounded conversation
+coordinator through that engine. Boot and
 failure-recovery checks remain future operational work. Module registration is
-an implemented extension convention. AI providers, other device
-adapters, persistence, and automation remain future concepts without placeholder
-interfaces.
+an implemented extension convention. Other providers, device adapters,
+persistence, and automation remain future work.
 
 ## Component responsibilities and dependency direction
 
@@ -41,6 +42,12 @@ interfaces.
 | `audio/streaming.py` | Raw ALSA pipes, partial I/O, process ownership, transport metrics | Existing backend/device helpers, PCM frames/control/errors |
 | `audio/session.py` | Subordinate lifecycle, worker ownership, bounded buffers, failure propagation | PCM transport/buffers/control, device selection |
 | `audio/stream_cli.py` | Explicit bounded capture, silent playback, sequential replay, metrics output | PCM sessions/frames, existing discovery |
+| `providers/gemini/config.py` | Private credentials, configurable model and limits | Provider errors |
+| `providers/gemini/client.py` | Lazy SDK, one session, normalized events, safe errors and cleanup | Provider config/errors/PCM |
+| `providers/gemini/pcm.py` | Provider format and incremental 24 kHz framing | Generic PCM frames, provider errors |
+| `providers/gemini/runtime.py` | Bounded async ownership and signal consumption | Existing stream control |
+| `providers/gemini/cli.py` | Explicit offline/live commands and terminal metrics | Concrete provider, conversation, audio selectors |
+| `conversation.py` | Turns, interruption epochs, finite buffering and cleanup | Concrete provider and existing StreamSession |
 
 Modules should not import the CLI or application controller. The application
 is the composition point that imports each concrete module's registrar.
@@ -111,10 +118,11 @@ logger name, and message. Optional file logs append the same format as UTF-8
 to `jarvis.log`. File rotation is not implemented. `print()` is used for CLI
 results and concise terminal diagnostics, not application lifecycle logging.
 
-Future provider credentials belong at provider boundaries and must not appear
+Provider credentials belong at provider boundaries and must not appear
 in configuration summaries, error strings, or logs. A private process environment
-is enough for an initial integration; no vault, `.env` loader, or cloud setup is
-present now. Ignoring credential files in Git is a convenience, not access control.
+is supported; Gemini also accepts an explicitly configured private owner-held
+key-only file outside Git. No vault, `.env` loader, or cloud setup is present.
+Ignoring credential files in Git is a convenience, not access control.
 
 ## Lifecycle
 
@@ -148,7 +156,7 @@ context performs final cleanup after `run()` returns.
 
 ### Scoped Linux signals
 
-The CLI's `run` and explicit `audio` commands install handlers. An `ExitStack` owns
+The CLI's `run`, explicit `audio`, and `ai` commands install handlers. An `ExitStack` owns
 `capture_shutdown_signals()` across configuration, startup, execution, application
 shutdown, and logging cleanup. Its callbacks only record the first SIGINT/SIGTERM
 in `ShutdownRequest`; repeated signals keep the same stop intent. They perform
@@ -186,7 +194,7 @@ The CLI parses help/version before loading settings. One-shot `status` and `demo
 commands enter the same lifecycle context as `run`. `status` describes that
 new application instance, not another process. Known failures produce exit 1,
 usage errors exit 2, and normal core completion/SIGINT/SIGTERM exit 0. Audio
-cancellation returns 128 plus the signal number (130 or 143) after cleanup. It is
+and provider cancellation return 128 plus the signal number (130 or 143) after cleanup. It is
 caught inside the lifecycle context and does not mark the application failed.
 Unexpected programming
 errors retain their traceback after lifecycle and logging cleanup.
@@ -216,13 +224,14 @@ or extra capabilities in the unit.
 The deployment paths are specific to this Pi and must be reviewed when moving
 the service elsewhere; application logic remains path independent. The unit is
 version controlled, syntax validated, and installed/enabled after Sprint 1
-approval. Sprints 2 and 3 do not restart or alter it; the running service retains
-its loaded v0.2.0 code while new CLI processes use v0.4.0.
+approval. Sprints 2–4 do not restart or alter it; the running service retains
+its loaded v0.2.0 code while new CLI processes use v0.5.0.
 [Operations](operations.md) covers approval, deployment, updates,
 logs, failure/reboot verification, and rollback. Existing SSH, Tailscale, audio,
 Bluetooth, camera, and other services are not reconfigured.
 
-Version 0.4.0 adds streaming alongside the v0.3.0 WAV subsystem. Existing CLI,
+Version 0.5.0 adds the optional Gemini provider alongside streaming and WAV.
+This minor increment adds capability while existing CLI,
 lifecycle, and module registration contracts remain compatible.
 
 ## Optional bounded audio
@@ -328,6 +337,55 @@ which closes capture before replay and retains only bounded PCM in memory.
 [The streaming guide](audio-streaming.md) documents the API, negotiated hardware
 formats, actual verification, limitations, and future conversational extension.
 
+## Optional conversational provider
+
+Explicit `ai` commands compose `GeminiClient` and `VoiceConversation` inside
+the existing application/signal scope. Construction performs no I/O.
+`ai models` is offline by default; only explicit live commands load credentials
+and create SDK resources. Core `run` has no provider registration, network
+connection, or audio action. `AppConfig` remains provider independent.
+
+Google's official optional `google-genai==2.29.0` SDK owns the WebSocket
+protocol. Its asynchronous API justifies a small asyncio coordinator for provider
+operations; generic audio retains its synchronous API and existing workers.
+Per-audio locks serialize retained executor calls through startup/read/write/
+drain/close, preventing cancellation from orphaning an I/O call. No second
+microphone implementation, network server, supervisor, or abstract provider
+framework is introduced.
+
+Provider messages normalize to concrete audio, completion, interruption, and
+GoAway events. Provider framing adapts 24 kHz mono S16_LE to 20 ms/960-byte
+`PCMFrame` objects. Input remains existing 16 kHz mono/640-byte frames.
+Only the shared ALSA backend knows the Jabra's 48 kHz conversion. The PCM engine
+imports no provider SDK types.
+
+Default sequential turns pause/close capture on response audio, notify Google
+of the input-stream end, and resume capture after actual native drain. The SDK
+receive iterator is reopened per interaction within the same connection.
+Generation completion is distinct from provider turn completion and device
+drain. Optional simultaneous capture/playback is experimental; acoustic echo
+handling and human barge-in remain unverified.
+
+The response FIFO limits bytes and packet count; each response has a 15-second
+default audio cap. Input has one serialized network send and the existing
+ten-slot freshness FIFO. Playback uses the existing ten-slot bounded admission
+path. Confirmed interruption invalidates an epoch, discards queued/partial stale
+bytes, and aborts current native playback before fresh output is played.
+Each call bounds duration, turn count, I/O waits, and resource churn.
+
+The coordinator owns network tasks and subordinate StreamSessions. Signal intent
+is consumed during ordinary async execution, with all resources stopped/closed
+and bridge calls awaited. Cleanup attempts every owned resource and preserves a
+primary failure. SDK raw exceptions become fixed diagnostics, SDK/network payload
+logging is scoped off and restored, and no transcripts/audio/session tokens are
+stored. There is no retry, resumption, or model fallback.
+
+[The Gemini guide](gemini-live.md) records the SDK, documented models, private
+credentials, project-dependent cost/privacy terms, commands, bounds, and
+acceptance procedure. Offline fakes and a fake-WebSocket actual-SDK test validate
+the software contract. Real connectivity, generated speech, microphone upload,
+and audible dialogue remain unverified.
+
 ## Add a module in an independent development stream
 
 1. Read this document, inspect current configuration and public lifecycle APIs,
@@ -390,8 +448,8 @@ The current synchronous handlers provide no timeout or task isolation, so do not
 silently put an indefinitely blocking adapter behind them.
 
 Reserve future namespaces through this documentation instead of empty packages:
-providers, other devices, connectivity, and automation are possible boundaries,
-not implemented APIs. The optional `audio` namespace is now implemented. Version
+other devices, connectivity, and automation remain possible boundaries.
+The optional `audio` and `providers/gemini` namespaces are implemented. Version
 any public contract deliberately and update the
 documentation when independent development streams integrate.
 
@@ -399,11 +457,12 @@ documentation when independent development streams integrate.
 
 Argparse, dataclasses, logging, and unittest meet the current needs. There is no
 web framework, network server, distributed message bus, persistent queue,
-database, workflow engine, async runtime, microservice, plugin discovery system,
+database, workflow engine, microservice, plugin discovery system,
 or secret-management platform. None solves a concrete current requirement.
-Previously installed third-party packages are not imported by Jarvis. Build-time
-setuptools and wheel are declared separately from the empty runtime dependency
-list. Linux process supervision is handled by systemd rather than a new Python
+Core/audio imports no third-party runtime package. Gemini imports the SDK
+lazily; asyncio is limited to explicit provider work. Build-time setuptools and
+wheel are separate from the empty required runtime list and optional Gemini extra.
+Linux process supervision is handled by systemd rather than a new Python
 framework. The application itself changes no audio, Bluetooth, network, systemd,
 or administrator configuration; installing the prepared unit is a separate,
 approved operational action.
@@ -435,5 +494,10 @@ and environment consistency. CLI tests also verify installed package imports
 outside the repository. Keep tests and the default application offline.
 Live service stop/restart, failure recovery, reboot, and hardware power-restoration
 tests are separate supervised operations and have not been claimed as automated
-test results. Sprint 3 ends at local streaming. Providers, recognition,
-automatic hotplug recovery, and Bluetooth remain future work.
+test results. Sprint 4 adds offline provider simulations, backpressure, multiple
+turns, interruptions during startup/write, duration limits, cleanup failures,
+credential/log safety, and actual POSIX signals during mocked connection,
+capture, and playback. Real API tests are approval-dependent commands and never
+run during unittest. Local 24 kHz silent Jabra playback passed; live speech and
+human listening remain pending. Recognition outside Gemini, automatic hotplug
+recovery, and Bluetooth remain future work.

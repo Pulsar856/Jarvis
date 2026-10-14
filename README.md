@@ -2,31 +2,37 @@
 
 Jarvis is a modular personal assistant intended to run primarily on a Raspberry
 Pi 5. The long-term vision includes voice conversation, interchangeable AI
-providers, device control, and automation. **Sprints 0–3 implement an offline
-core, Linux service operation, and optional local WAV/PCM audio.** Core commands
-need no hardware or API key. Explicit audio commands need local ALSA utilities and the
+providers, device control, and automation. **Sprints 0–4 implement an offline
+core, Linux service operation, local WAV/PCM audio, and optional Gemini Live.**
+Core commands need no hardware or API key. Explicit audio commands need ALSA and the
 selected device; they never contact cloud services.
 
 ## Current status
 
-Version 0.4.0 provides standard Python packaging, a command-line interface,
+Version 0.5.0 provides standard Python packaging, a command-line interface,
 validated environment configuration, console and optional file logging, an
 explicit application lifecycle, and synchronous command dispatch. The built-in
 `hello` handler demonstrates the module convention. There are no runtime
-dependencies beyond the Python standard library. Sprint 1 adds graceful SIGINT
+dependencies beyond the Python standard library for core/audio. The optional
+Gemini extra pins Google's official SDK. Sprint 1 adds graceful SIGINT
 and SIGTERM shutdown and a systemd service. Sprint 2 adds device discovery,
 bounded PCM WAV recording/playback, and a temporary-file loopback test. Sprint 3
 adds incremental raw PCM capture/playback, bounded buffers, cancellation, session
 ownership, and metrics.
 
+Sprint 4 adds explicit, bounded Gemini connection, generated-audio, and voice
+conversation commands through the existing PCM engine. Offline simulations pass;
+real Gemini connectivity, microphone upload, and audible dialogue remain
+unverified.
+
 The approved service deployment was installed, enabled, and started on
-12 October 2026. Sprints 2 and 3 found it running with its original PID and zero
+12 October 2026. Sprints 2–4 found it running with its original PID and zero
 restarts. It has not been stopped, restarted, or reconfigured for audio. Its
-already imported code remains v0.2.0; newly launched CLI processes use v0.4.0.
+already imported code remains v0.2.0; newly launched CLI processes use v0.5.0.
 Reboot, power-restoration, and service failure/recovery tests remain unperformed.
 
-The minor increment to 0.4.0 reflects the streaming subsystem. Existing
-CLI commands and application/dispatch APIs remain compatible.
+The minor increment to 0.5.0 reflects the new optional conversational provider.
+Existing CLI commands and application/dispatch APIs remain compatible.
 
 The primary environment is Raspberry Pi 5, Debian 12 Bookworm, ARM64/aarch64,
 and Python 3.11.2. Python 3.11 or newer is required. Hardware access stays in the
@@ -65,7 +71,21 @@ python -m pip install --no-deps -e .
 
 That standard command may access PyPI to obtain isolated build dependencies
 (`setuptools` and `wheel`). It needs no credentials. Runtime execution and tests
-remain offline, and no AI or hardware packages are installed by this project.
+remain offline. The default install adds no AI or hardware runtime packages.
+
+For explicit Gemini operations, install the optional extra:
+
+```bash
+python -m pip install -e '.[gemini]'
+python -m pip check
+```
+
+This command needs network access for `google-genai==2.29.0` and its dependencies.
+It is already installed in the audited virtual environment. The SDK supports
+Python 3.11 and reuses the existing WebSocket package; Jarvis adds no competing
+network stack. No unrelated packages were upgraded. Core/audio commands and
+offline tests work without the extra; only the actual SDK serialization test
+skips when the extra is absent.
 
 ## Run
 
@@ -128,8 +148,8 @@ python -m jarvis audio loopback --input-device jabra --output-device jabra --dur
 ```
 
 `JARVIS_AUDIO_INPUT` and `JARVIS_AUDIO_OUTPUT` optionally supply selectors;
-explicit CLI flags take precedence. Only audio commands read these settings.
-Invalid settings or missing utilities/devices do not prevent core commands from
+explicit CLI flags take precedence. Only explicit audio/voice commands read
+these settings. Invalid settings or missing utilities/devices do not prevent core commands from
 starting. Enumeration reports detection and configuration, not functional health.
 
 The observed Jabra SPEAK 510 captures native 16 kHz mono S16_LE. Jabra playback
@@ -189,6 +209,43 @@ is 16 KiB, so buffering limits still matter for future latency work.
 See [the streaming guide](docs/audio-streaming.md) for the frame API, metrics,
 ownership, actual format negotiation, test scope, and future adapter boundary.
 
+## Explicit Gemini Live
+
+```bash
+python -m jarvis ai models
+python -m jarvis ai --help
+```
+
+These commands are offline. The default model is configurable `gemini-3.8-live`,
+matching the [current Google guide](https://ai.google.dev/gemini-api/docs/live-api/get-started-sdk)
+reviewed on 12 October 2026. Google lists free-tier usage, but access, actual
+quotas, billing, and regional terms depend on your project. A key alone does not
+guarantee zero charges. Model listing is not proof of Live access.
+
+Follow [the Gemini guide](docs/gemini-live.md) to configure a key privately
+outside this repository and review cost/privacy terms. After explicit approval,
+run each live stage separately:
+
+```bash
+python -m jarvis ai connect-test
+python -m jarvis ai speak-test --duration 15
+python -m jarvis ai talk --duration 30 --max-turns 2
+```
+
+These commands contact Google. `connect-test` confirms setup and closes without
+microphone capture or generation. `speak-test` requests one brief spoken response.
+`talk` opens the microphone only after successful setup; sequential mode closes
+capture during speech playback and resumes after native drain. Ctrl+C/SIGTERM
+cancel with exit 130/143. Default talk limits are 60 seconds and three spoken
+turns, with hard maxima of 120 seconds/five turns. No automatic retries,
+reconnections, paid-model fallback, saved recordings, or transcripts are added.
+The `--full-duplex` flag is experimental; acoustic barge-in is unverified.
+Provider audio is checked as 24 kHz mono S16_LE and played through existing
+ALSA conversion to the Jabra's 48 kHz path.
+
+Normal `run` and systemd operation stay offline and open no microphone.
+No real Gemini API test was performed in Sprint 4; each needs user approval.
+
 ## Linux service operation
 
 The [systemd unit](deploy/systemd/jarvis.service) uses the system manager
@@ -204,7 +261,7 @@ The unit is **installed, enabled, and running** on the audited Pi. Follow the
 restart/reboot verification, controlled failure testing, and rollback. Manual
 CLI use continues to work independently of systemd. Being alive does not imply
 that the service is listening or providing AI functionality. Do not restart or
-modify the live service for Sprint 3 without explicit approval. The operations
+modify the live service for Sprint 4. The operations
 guide records the earlier deployment; supervision behavior is unchanged.
 
 ## Configuration
@@ -216,9 +273,13 @@ Configuration is loaded once per command and validated before startup.
 | `JARVIS_APP_NAME` | `Jarvis` | Display name; cannot be blank or contain control characters. |
 | `JARVIS_LOG_LEVEL` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`; case insensitive in the environment. |
 | `JARVIS_LOG_DIR` | Unset | Optional directory; created as needed, with UTF-8 output appended to `jarvis.log`. |
-| Application version | `0.4.0` | Defined by `jarvis.__version__`; not overridden by the environment. |
-| `JARVIS_AUDIO_INPUT` | `jabra` | Capture selector for explicit audio commands; CLI flags override it. |
-| `JARVIS_AUDIO_OUTPUT` | `jabra` | Playback selector for explicit audio commands; CLI flags override it. |
+| Application version | `0.5.0` | Defined by `jarvis.__version__`; not overridden by the environment. |
+| `JARVIS_AUDIO_INPUT` | `jabra` | Capture selector for explicit audio/voice commands; CLI flags override it. |
+| `JARVIS_AUDIO_OUTPUT` | `jabra` | Playback selector for explicit audio/voice commands; CLI flags override it. |
+| `GEMINI_API_KEY` | Unset | Private interactive credential, read only for explicit live AI commands. |
+| `GEMINI_API_KEY_FILE` | Unset | Alternative private owner-held key file outside the repository. |
+| `GEMINI_MODEL` | `gemini-3.8-live` | AI model; `--model` overrides it. |
+| `JARVIS_GEMINI_MAX_SECONDS` | `60` | Connected-session cap, 1–120; `--duration` overrides it. |
 
 ```bash
 JARVIS_APP_NAME="Jarvis Lab" JARVIS_LOG_LEVEL=DEBUG python -m jarvis status
@@ -232,18 +293,15 @@ unavailable directory or an unwritable log file causes a clear startup error.
 Omit `JARVIS_LOG_DIR` for console-only logging. File rotation is not implemented.
 
 No development/production switch is provided because there is currently no
-behavior that would need it. Configuration files and `.env` files are not loaded.
+behavior that would need it. `.env` files are not loaded.
 The existing `config/` skeleton remains reserved and unused.
 
-### Future credentials
+### Provider credentials
 
-When an AI adapter is implemented, it should read only its documented credential
-variables at the adapter boundary. Supply credentials through the process
-environment or a private, user-owned environment file with restricted permissions.
-Do not commit keys, pass them in command-line arguments, or include them in
-configuration summaries, exceptions, or logs. `.env` and `.env.*` are ignored by
-Git; any eventual `.env.example` must contain placeholders only. No credential
-loading or secret-management infrastructure is implemented in these sprints.
+Gemini credentials stay at the provider boundary, outside `AppConfig`, status
+output, and systemd. The optional key file contains only the key, with mode 0600;
+it is not an environment script. Never put a key in Git, CLI arguments, chat,
+configuration summaries, or logs. See the [private setup procedure](docs/gemini-live.md#private-credentials).
 
 ## Tests and checks
 
@@ -265,6 +323,10 @@ opens no microphone. Real child-process tests verify cancellation, deadlines,
 and reaping. Streaming tests add frame contracts, backpressure, partial I/O,
 startup rollback, worker joining, and real signals against synthetic utilities.
 Physical Jabra checks are separate explicit operations.
+Gemini tests use synthetic credentials, fake providers/audio, synthetic capture
+processes, and real OS signals during connection, capture, and playback. The
+optional real SDK test replaces its WebSocket with a fake and checks serialization
+without contacting Google. No automated test makes a network request.
 CLI subprocess tests have five-second deadlines and kill a lingering child on
 failure. Unit syntax validation has a ten-second timeout and runs when the local
 systemd utility and
@@ -286,6 +348,8 @@ voice-assistant/
 │   ├── signals.py             # Temporary SIGINT/SIGTERM handlers and stop intent
 │   ├── application.py         # Lifecycle, shutdown, and central dispatch access
 │   ├── dispatch.py            # Named handler table and explicit errors
+│   ├── conversation.py        # Bounded provider/audio turn orchestration
+│   ├── providers/gemini/      # Lazy SDK, settings, safe errors, events, framing, CLI
 │   ├── audio/
 │   │   ├── __init__.py        # Optional namespace; no hardware side effects
 │   │   ├── devices.py         # Structured metadata and stable selection
@@ -307,6 +371,7 @@ voice-assistant/
 ├── docs/operations.md         # Deployment, journal, recovery, and rollback
 ├── docs/audio.md              # Audio audit, commands, limits, and verification
 ├── docs/audio-streaming.md    # PCM API, buffering, metrics, and smoke tests
+├── docs/gemini-live.md        # Explicit cloud commands, credentials, limits, evidence
 ├── deploy/systemd/jarvis.service # Linux service definition; not auto-installed
 ├── config/.gitkeep            # Original skeleton; no active config files
 ├── .gitignore
@@ -318,14 +383,14 @@ installation creates ignored package metadata under `src/`.
 
 ## Scope and next milestones
 
-Implemented functionality is the core, deterministic demo, and explicit local
-audio. Physical capture/playback transport was verified on the Jabra, including
+Implemented functionality is the core, deterministic demo, explicit local audio,
+and the optional bounded Gemini prototype. Physical capture/playback transport was verified on the Jabra, including
 WAV metadata, native PCM state, playback timing, and temporary cleanup. Human
 confirmation of audible playback remains unverified.
 Handlers are explicit no-argument Python callables that return a result.
 Dispatch is synchronous, so a slow handler would block its caller. There is no
 automatic plugin discovery, background work, event queue, persistence, scheduling,
-network server, AI provider, speech recognition, wake word, camera, or Bluetooth
+network server, local speech recognition, wake word, camera, or Bluetooth
 integration. Service deployment is complete; restart recovery, reboot, and
 hardware power restoration still need supervised tests. There is no readiness
 protocol or watchdog: an active service describes a running process, not
@@ -333,12 +398,19 @@ functional health.
 SIGKILL and power loss cannot invoke Python cleanup. File rotation remains
 unimplemented; journal retention follows the host's existing journal settings.
 
-Sprint 3 ends at local PCM streaming. Devices that disconnect cause explicit
+Sprint 4 ends at the offline-verified conversational prototype. Real Live API
+setup, generated speech, microphone transmission, and human listening still need
+separately approved supervised checks. A two-second 24 kHz silent Jabra playback
+test drained 100 frames in 2.043 seconds with no loss; this establishes local
+transport compatibility, not Gemini performance or audible dialogue.
+Devices that disconnect cause explicit
 errors and cleanup; automatic hotplug recovery and audio-server coordination
-are not implemented. A future conversational adapter can consume/produce
-validated PCM frames through `StreamSession`, while owning its credentials,
-network transport, format conversion, and turn/interrupt policy. Those adapter
-features, recognition, and Bluetooth are not implemented here.
+are not implemented. The concrete Gemini adapter consumes/produces validated PCM
+through `StreamSession`; SDK types stay outside the audio engine. Future providers
+can use the same boundary without an abstract plugin framework. The recommended
+next sprint is supervised live acceptance and measured latency/turn-taking
+improvements. No wake word, memory, device automation, or service AI activation
+is implemented.
 
 See [the architecture and integration guide](docs/architecture.md) before adding
 a module. That document records the current extension conventions independently

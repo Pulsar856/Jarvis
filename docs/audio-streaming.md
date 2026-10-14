@@ -1,4 +1,4 @@
-# PCM streaming — Jarvis v0.4.0
+# PCM streaming — Jarvis v0.5.0
 
 Sprint 3 adds local incremental audio alongside the existing WAV commands. It
 works offline with the installed ALSA utilities and Python standard library.
@@ -13,7 +13,7 @@ owning producer -> finite playback FIFO -> PlaybackStream -> aplay stdin
 ```
 
 `StreamSession` owns the enabled transports, buffers, and workers. The consumer
-or producer can be the CLI today and a conversational adapter later; it does not
+or producer can be the CLI or Sprint 4 conversation coordinator; it does not
 need to know ALSA arguments. Existing discovery, persistent selectors, error
 classes, signal requests, process-group signaling, and Jabra conversion policy
 are reused. The existing file operations are not routed through streaming.
@@ -237,15 +237,17 @@ Human sound-quality confirmation, captured-voice streaming replay, actual unplug
 during I/O, competing-client device-busy behavior, long-duration stability,
 other devices/formats, and audio inside the live service remain unverified.
 Automatic hotplug recovery, acoustic echo cancellation, speech recognition,
-wake word, synthesis, and provider networking are not implemented.
+wake word, and local synthesis are not implemented. Optional provider networking
+is documented separately in [Gemini Live](gemini-live.md); real voice acceptance
+remains unverified.
 
 The live jarvis.service remains enabled/active with PID 7480, zero restarts, and
-its loaded v0.2.0 code. New standalone CLI processes use v0.4.0. No unit, system
+its loaded v0.2.0 code. New standalone CLI processes use v0.5.0. No unit, system
 package, device permission, PipeWire/PulseAudio/ALSA configuration, reboot, or
 other service was changed. The earlier [operations guide](operations.md) remains
 the deployment reference; any live restart/update needs explicit approval.
 
-## Small extension boundary for a future conversational sprint
+## Small conversational extension boundary
 
 Use `StreamSession` inside the existing Application resource scope. One owning
 consumer calls `read_frame(timeout=...)`; one owning producer calls
@@ -269,14 +271,30 @@ finally:
     session.close()
 ```
 
-A future adapter owns network framing, credentials, remote deadlines, rate
-conversion, conversational turns, and cancellation policy. It should consume
+The Sprint 4 Gemini adapter owns network framing, credentials, remote deadlines,
+provider formats, and events. Its small coordinator owns conversational turns
+and cancellation policy. Additional providers should consume
 logical PCM metadata and payloads, and assemble returned data into validated,
 ordered PCMFrame objects. Different rate/frame-size contracts require explicit
 adaptation; copying metadata does not resample audio. It must handle reported
 capture gaps, playback backpressure, remote loss, and session failure without
-unbounded queues. No provider interface, WebSocket, key loading, VAD, or AI
-integration is included in Sprint 3.
+unbounded queues. This integration uses the PCM API unchanged; SDK types never
+enter the generic audio engine.
+
+Gemini input reuses default 16 kHz mono/20 ms frames. Output is verified as
+24 kHz mono S16_LE and assembled into 960-byte/20 ms frames without relabeling.
+The shared Jabra converter adapts logical 24 kHz to native 48 kHz stereo.
+A separate explicit two-second 24 kHz silent playback test on 12 October 2026
+drained all 100 frames/96000 bytes in 2.043 seconds with zero loss/errors, a
+1.45 ms first pipe write, and a 16384-byte pipe. This local test made no Google
+request and establishes no audible/Gemini performance.
+
+Default conversation pauses microphone capture during response playback and
+resumes after `finish_playback()` drains. Provider interruption invalidates
+queued/partial response epochs and calls `request_stop()`/owner `close()` on
+old playback. Explicit async provider coordination uses retained, serialized
+executor calls around this synchronous API. Frame buffers, workers, subprocess
+ownership, and local commands are unchanged.
 
 References: [ALSA raw/stdio and buffering options](https://github.com/alsa-project/alsa-utils/blob/v1.2.8/aplay/aplay.1),
 [Python selectors](https://docs.python.org/3.11/library/selectors.html), and

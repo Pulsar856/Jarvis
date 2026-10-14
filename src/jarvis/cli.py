@@ -14,6 +14,8 @@ from jarvis.application import Application, ApplicationError
 from jarvis.config import AppConfig, ConfigurationError
 from jarvis.dispatch import DispatchError
 from jarvis.logging import close_logging, configure_logging
+from jarvis.providers.gemini.cli import add_ai_commands, run_ai
+from jarvis.providers.gemini.errors import ProviderError
 from jarvis.signals import SignalHandlingError, capture_shutdown_signals
 
 
@@ -31,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     commands.add_parser("demo", help="execute the built-in hello command")
     commands.add_parser("run", help="run until Ctrl+C or SIGTERM")
     add_audio_commands(commands)
+    add_ai_commands(commands)
     return parser
 
 
@@ -63,7 +66,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         try:
             signals = (
                 process_scope.enter_context(capture_shutdown_signals())
-                if args.command in ("run", "audio") else None
+                if args.command in ("run", "audio", "ai") else None
             )
             config = AppConfig.from_env()
             configure_logging(config)
@@ -75,6 +78,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 elif args.command == "audio":
                     try:
                         run_audio(args, signals)
+                    except AudioCancelled as exc:
+                        logging.getLogger(__name__).info("%s", exc)
+                        return 128 + exc.signum
+                elif args.command == "ai":
+                    try:
+                        run_ai(args, signals)
                     except AudioCancelled as exc:
                         logging.getLogger(__name__).info("%s", exc)
                         return 128 + exc.signum
@@ -93,7 +102,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             return 0
         except (
             ConfigurationError, ApplicationError, DispatchError,
-            SignalHandlingError, AudioError, OSError,
+            SignalHandlingError, AudioError, ProviderError, OSError,
         ) as exc:
             print(f"jarvis: {exc}", file=sys.stderr)
             return 1
